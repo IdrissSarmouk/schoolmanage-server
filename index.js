@@ -1123,6 +1123,309 @@ app.get('/api/teachers/:id/evaluations', async (req, res) => {
 });
 
 
+// API to get attendance status for all students
+app.get('/api/attendance/status', async (req, res) => {
+  try {
+    const { rows } = await db.query(`
+      SELECT 
+        u.id as student_id,
+        u.first_name,
+        u.last_name,
+        c.name as class_name,
+        s.name as subject_name,
+        a.date,
+        a.status
+      FROM my_schema.users u
+      JOIN my_schema.classes c ON u.class_id = c.id
+      JOIN my_schema.attendance a ON a.student_id = u.id
+      JOIN my_schema.subjects s ON a.subject_id = s.id
+      WHERE u.role = 'student'
+      ORDER BY a.date DESC, u.last_name, u.first_name
+    `);
+    
+    res.json(rows);
+  } catch (err) {
+    console.error('Error in GET /api/attendance/status:', err);
+    res.status(500).json({ error: 'Erreur serveur', message: err.message });
+  }
+});
+
+// API to get attendance status for a specific student
+app.get('/api/attendance/status/:studentId', async (req, res) => {
+  const studentId = req.params.studentId;
+  
+  try {
+    // Verify student exists
+    const { rows: studentCheck } = await db.query(
+      'SELECT 1 FROM my_schema.users WHERE id = $1 AND role = $2',
+      [studentId, 'student']
+    );
+    
+    if (!studentCheck.length) {
+      return res.status(404).json({ error: 'Élève non trouvé' });
+    }
+    
+    const { rows } = await db.query(`
+      SELECT 
+        a.id as attendance_id,
+        s.name as subject_name,
+        a.date,
+        a.status
+      FROM my_schema.attendance a
+      JOIN my_schema.subjects s ON a.subject_id = s.id
+      WHERE a.student_id = $1
+      ORDER BY a.date DESC, s.name
+    `, [studentId]);
+    
+    res.json(rows);
+  } catch (err) {
+    console.error('Error in GET /api/attendance/status/:studentId:', err);
+    res.status(500).json({ error: 'Erreur serveur', message: err.message });
+  }
+});
+
+// API to get attendance status for students in a specific class
+app.get('/api/attendance/status/class/:classId', async (req, res) => {
+  const classId = req.params.classId;
+  const date = req.query.date; // Optional: filter by specific date
+  const subjectId = req.query.subjectId; // Optional: filter by specific subject
+  
+  try {
+    // Verify class exists
+    const { rows: classCheck } = await db.query(
+      'SELECT 1 FROM my_schema.classes WHERE id = $1',
+      [classId]
+    );
+    
+    if (!classCheck.length) {
+      return res.status(404).json({ error: 'Classe non trouvée' });
+    }
+    
+    // Build dynamic query with optional filters
+    let query = `
+      SELECT 
+        u.id as student_id,
+        u.first_name,
+        u.last_name,
+        s.name as subject_name,
+        a.date,
+        a.status
+      FROM my_schema.users u
+      LEFT JOIN my_schema.attendance a ON a.student_id = u.id
+      LEFT JOIN my_schema.subjects s ON a.subject_id = s.id
+      WHERE u.role = 'student' AND u.class_id = $1
+    `;
+    
+    const queryParams = [classId];
+    let paramCounter = 2;
+    
+    if (date) {
+      query += ` AND a.date = $${paramCounter}`;
+      queryParams.push(date);
+      paramCounter++;
+    }
+    
+    if (subjectId) {
+      query += ` AND a.subject_id = $${paramCounter}`;
+      queryParams.push(subjectId);
+    }
+    
+    query += ` ORDER BY u.last_name, u.first_name, a.date DESC`;
+    
+    const { rows } = await db.query(query, queryParams);
+    
+    res.json(rows);
+  } catch (err) {
+    console.error('Error in GET /api/attendance/status/class/:classId:', err);
+    res.status(500).json({ error: 'Erreur serveur', message: err.message });
+  }
+});
+
+// API to record attendance for students
+app.post('/api/attendance/record', async (req, res) => {
+  const { studentId, subjectId, date, status } = req.body;
+  
+  // Validate required fields
+  if (!studentId || !subjectId || !date || !status) {
+    return res.status(400).json({ error: 'Champs manquants' });
+  }
+  
+  // Validate status enum
+  if (!['present', 'absent', 'late'].includes(status)) {
+    return res.status(400).json({ error: 'Statut invalide' });
+  }
+  
+  try {
+    // Check for existing attendance record
+    const { rows: existingCheck } = await db.query(
+      'SELECT id FROM my_schema.attendance WHERE student_id = $1 AND subject_id = $2 AND date = $3',
+      [studentId, subjectId, date]
+    );
+    
+    let result;
+    
+    if (existingCheck.length) {
+      // Update existing record
+      const { rows } = await db.query(`
+        UPDATE my_schema.attendance
+        SET status = $1
+        WHERE student_id = $2 AND subject_id = $3 AND date = $4
+        RETURNING id, status
+      `, [status, studentId, subjectId, date]);
+      
+      result = {
+        message: 'Présence mise à jour avec succès',
+        attendance: rows[0]
+      };
+    } else {
+      // Create new record
+      const { rows } = await db.query(`
+        INSERT INTO my_schema.attendance
+          (student_id, subject_id, date, status)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, status
+      `, [studentId, subjectId, date, status]);
+      
+      result = {
+        message: 'Présence enregistrée avec succès',
+        attendance: rows[0]
+      };
+    }
+    
+    res.status(201).json(result);
+  } catch (err) {
+    console.error('Error in POST /api/attendance/record:', err);
+    res.status(500).json({ error: 'Erreur serveur', message: err.message });
+  }
+});
+
+// API to record attendance for multiple students at once (bulk operation)
+app.post('/api/attendance/bulk-record', async (req, res) => {
+  const { records } = req.body;
+  
+  // Validate request body
+  if (!records || !Array.isArray(records) || records.length === 0) {
+    return res.status(400).json({ error: 'Données invalides' });
+  }
+  
+  try {
+    const results = [];
+    
+    // Use a transaction for bulk operations
+    await db.query('BEGIN');
+    
+    for (const record of records) {
+      const { studentId, subjectId, date, status } = record;
+      
+      // Validate required fields
+      if (!studentId || !subjectId || !date || !status) {
+        await db.query('ROLLBACK');
+        return res.status(400).json({ error: 'Champs manquants dans les enregistrements' });
+      }
+      
+      // Validate status enum
+      if (!['present', 'absent', 'late'].includes(status)) {
+        await db.query('ROLLBACK');
+        return res.status(400).json({ error: 'Statut invalide dans les enregistrements' });
+      }
+      
+      // Check for existing attendance record
+      const { rows: existingCheck } = await db.query(
+        'SELECT id FROM my_schema.attendance WHERE student_id = $1 AND subject_id = $2 AND date = $3',
+        [studentId, subjectId, date]
+      );
+      
+      let result;
+      
+      if (existingCheck.length) {
+        // Update existing record
+        const { rows } = await db.query(`
+          UPDATE my_schema.attendance
+          SET status = $1
+          WHERE student_id = $2 AND subject_id = $3 AND date = $4
+          RETURNING id, student_id, subject_id, date, status
+        `, [status, studentId, subjectId, date]);
+        
+        result = rows[0];
+      } else {
+        // Create new record
+        const { rows } = await db.query(`
+          INSERT INTO my_schema.attendance
+            (student_id, subject_id, date, status)
+          VALUES ($1, $2, $3, $4)
+          RETURNING id, student_id, subject_id, date, status
+        `, [studentId, subjectId, date, status]);
+        
+        result = rows[0];
+      }
+      
+      results.push(result);
+    }
+    
+    // Commit the transaction
+    await db.query('COMMIT');
+    
+    res.status(201).json({
+      message: 'Présences enregistrées avec succès',
+      records: results
+    });
+  } catch (err) {
+    // Rollback on error
+    await db.query('ROLLBACK');
+    console.error('Error in POST /api/attendance/bulk-record:', err);
+    res.status(500).json({ error: 'Erreur serveur', message: err.message });
+  }
+});
+
+// API to get attendance statistics for a student
+app.get('/api/attendance/statistics/:studentId', async (req, res) => {
+  const studentId = req.params.studentId;
+  
+  try {
+    // Verify student exists
+    const { rows: studentCheck } = await db.query(
+      'SELECT 1 FROM my_schema.users WHERE id = $1 AND role = $2',
+      [studentId, 'student']
+    );
+    
+    if (!studentCheck.length) {
+      return res.status(404).json({ error: 'Élève non trouvé' });
+    }
+    
+    // Get attendance statistics by subject
+    const { rows } = await db.query(`
+      SELECT 
+        s.name as subject_name,
+        COUNT(CASE WHEN a.status = 'present' THEN 1 END) as present_count,
+        COUNT(CASE WHEN a.status = 'absent' THEN 1 END) as absent_count,
+        COUNT(CASE WHEN a.status = 'late' THEN 1 END) as late_count,
+        COUNT(a.id) as total_count,
+        ROUND(
+          (COUNT(CASE WHEN a.status = 'present' THEN 1 END)::numeric / 
+           NULLIF(COUNT(a.id), 0) * 100)::numeric, 
+          2
+        ) as attendance_rate
+      FROM my_schema.subjects s
+      LEFT JOIN my_schema.attendance a ON a.subject_id = s.id AND a.student_id = $1
+      GROUP BY s.name
+      ORDER BY s.name
+    `, [studentId]);
+    
+    res.json(rows);
+  } catch (err) {
+    console.error('Error in GET /api/attendance/statistics/:studentId:', err);
+    res.status(500).json({ error: 'Erreur serveur', message: err.message });
+  }
+});
+
+
+
+
+
+
+
+
+
 
 // 404 handler
 app.use((req, res) => res.status(404).json({ error: 'Not Found' }));

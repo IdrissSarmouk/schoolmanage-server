@@ -74,7 +74,6 @@ CREATE TABLE my_schema.attendance (
   subject_id INT REFERENCES my_schema.subjects(id) ON DELETE SET NULL,
   date DATE NOT NULL,
   status my_schema.attendance_status NOT NULL,
-  remark TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
