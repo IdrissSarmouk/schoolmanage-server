@@ -687,7 +687,6 @@ app.get('/api/teachers/:id/attendance-rates', async (req, res) => {
   }
 });
 
-// API to get monthly attendance trend for all classes of a teacher
 app.get('/api/teachers/:id/attendance-trends', async (req, res) => {
   const teacherId = req.params.id;
   
@@ -751,7 +750,6 @@ app.get('/api/teachers/:id/attendance-trends', async (req, res) => {
   }
 });
 
-// API to get average grades by month for a teacher's classes
 app.get('/api/teachers/:id/grade-trends', async (req, res) => {
   const teacherId = req.params.id;
   
@@ -779,7 +777,6 @@ app.get('/api/teachers/:id/grade-trends', async (req, res) => {
   }
 });
 
-// API to get subject comparison for a teacher's classes
 app.get('/api/teachers/:id/subject-comparison', async (req, res) => {
   const teacherId = req.params.id;
   
@@ -832,6 +829,298 @@ app.get('/api/teachers/:id/subject-comparison', async (req, res) => {
 
 
 
+
+
+
+
+app.get('/api/teachers/:id/classes', async (req, res) => {
+  const teacherId = req.params.id;
+  
+  try {
+    // Verify the user is a teacher
+    const { rows: teacherCheck } = await db.query(
+      'SELECT 1 FROM my_schema.users WHERE id = $1 AND role = $2',
+      [teacherId, 'teacher']
+    );
+    
+    if (!teacherCheck.length) {
+      return res.status(404).json({ error: 'Enseignant non trouvé' });
+    }
+    
+    // Get all classes assigned to this teacher
+    const { rows } = await db.query(`
+      SELECT c.id, c.name
+      FROM my_schema.teacher_classes tc
+      JOIN my_schema.classes c ON tc.class_id = c.id
+      WHERE tc.teacher_id = $1
+      ORDER BY c.name
+    `, [teacherId]);
+    
+    res.json(rows);
+  } catch (err) {
+    console.error('Error in /api/teachers/:id/classes:', err);
+    res.status(500).json({ error: 'Erreur serveur', message: err.message });
+  }
+});
+
+app.get('/api/teachers/:id/classes/:classId/students', async (req, res) => {
+  const teacherId   = req.params.id;
+  const classId     = req.params.classId;
+  const evaluationId = req.query.evaluationId; // optional
+
+  try {
+    // … your checks for teacher existence and class assignment …
+
+    // Base SELECT
+    let sql = `
+      SELECT 
+        u.id,
+        u.first_name,
+        u.last_name,
+        u.email,
+        c.name AS class_name
+    `;
+
+    // Add grade columns if needed
+    if (evaluationId) {
+      sql += `,
+        g.grade,
+        g.comment,
+        e.title            AS evaluation_title,
+        e.date             AS evaluation_date,
+        e.coefficient      AS evaluation_coefficient
+      `;
+    }
+
+    sql += `
+      FROM my_schema.users u
+      JOIN my_schema.classes c 
+        ON u.class_id = c.id
+    `;
+
+    if (evaluationId) {
+      sql += `
+        LEFT JOIN my_schema.grades g 
+          ON u.id = g.student_id 
+         AND g.evaluation_id = $2
+        LEFT JOIN my_schema.evaluations e 
+          ON e.id = g.evaluation_id
+      `;
+    }
+
+    sql += `
+      WHERE u.role = 'student'
+        AND u.class_id = $1
+      ORDER BY u.last_name, u.first_name
+    `;
+
+    // Build params to match $1, $2
+    const params = evaluationId 
+      ? [classId, evaluationId] 
+      : [classId];
+
+    const { rows } = await db.query(sql, params);
+    return res.json(rows);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erreur serveur', message: err.message });
+  }
+});
+
+
+app.post('/api/teachers/:id/evaluations', async (req, res) => {
+  const teacherId = req.params.id;
+  const { title, date, coefficient, classId } = req.body;
+  
+  // Validate required fields
+  if (!title || !date || !classId) {
+    return res.status(400).json({ error: 'Champs manquants' });
+  }
+  
+  try {
+    // Verify the user is a teacher
+    const { rows: teacherData } = await db.query(
+      'SELECT id, subject_id FROM my_schema.users WHERE id = $1 AND role = $2',
+      [teacherId, 'teacher']
+    );
+    
+    if (!teacherData.length) {
+      return res.status(404).json({ error: 'Enseignant non trouvé' });
+    }
+    
+    const subjectId = teacherData[0].subject_id;
+    
+    // Verify the teacher teaches this class
+    const { rows: classCheck } = await db.query(
+      'SELECT 1 FROM my_schema.teacher_classes WHERE teacher_id = $1 AND class_id = $2',
+      [teacherId, classId]
+    );
+    
+    if (!classCheck.length) {
+      return res.status(403).json({ error: 'Vous n\'êtes pas assigné à cette classe' });
+    }
+    
+    // Create the evaluation
+    const { rows } = await db.query(`
+      INSERT INTO my_schema.evaluations 
+        (title, date, coefficient, subject_id, class_id, teacher_id)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id, title, date, coefficient
+    `, [title, date, coefficient || 1, subjectId, classId, teacherId]);
+    
+    res.status(201).json({
+      message: 'Évaluation créée avec succès',
+      evaluation: rows[0]
+    });
+  } catch (err) {
+    console.error('Error in POST /api/teachers/:id/evaluations:', err);
+    res.status(500).json({ error: 'Erreur serveur', message: err.message });
+  }
+});
+
+
+app.post('/api/teachers/:id/grades', async (req, res) => {
+  const teacherId = req.params.id;
+  const { studentId, evaluationId, grade, remarks } = req.body;
+
+  // Validation
+  if (!studentId || !evaluationId || grade === undefined) {
+    return res.status(400).json({ error: 'Champs manquants' });
+  }
+
+  if (grade < 0 || grade > 20) {
+    return res.status(400).json({ error: 'La note doit être comprise entre 0 et 20' });
+  }
+
+  try {
+    // Check if the teacher owns the evaluation
+    const { rows: evalCheck } = await db.query(
+      'SELECT 1 FROM my_schema.evaluations WHERE id = $1 AND teacher_id = $2',
+      [evaluationId, teacherId]
+    );
+
+    if (!evalCheck.length) {
+      return res.status(403).json({ error: 'Vous n\'êtes pas autorisé à modifier cette évaluation' });
+    }
+
+    // Check for existing grade
+    const { rows: gradeCheck } = await db.query(
+      'SELECT id FROM my_schema.grades WHERE student_id = $1 AND evaluation_id = $2',
+      [studentId, evaluationId]
+    );
+
+    let result;
+
+    if (gradeCheck.length) {
+      // Update
+      const { rows } = await db.query(
+        `UPDATE my_schema.grades
+         SET grade = $1, remarks = $2
+         WHERE student_id = $3 AND evaluation_id = $4
+         RETURNING id, grade, remarks`,
+        [grade, remarks, studentId, evaluationId]
+      );
+
+      result = {
+        message: 'Note mise à jour avec succès',
+        grade: rows[0]
+      };
+    } else {
+      // Insert
+      const { rows } = await db.query(
+        `INSERT INTO my_schema.grades
+         (student_id, evaluation_id, grade, remarks)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, grade, remarks`,
+        [studentId, evaluationId, grade, remarks]
+      );
+
+      result = {
+        message: 'Note ajoutée avec succès',
+        grade: rows[0]
+      };
+    }
+
+    res.status(201).json(result);
+  } catch (err) {
+    console.error('Error in POST /api/teachers/:id/grades:', err);
+    res.status(500).json({ error: 'Erreur serveur', message: err.message });
+  }
+});
+
+app.get('/api/teachers/:id/evaluations/:evaluationId/grades', async (req, res) => {
+  const teacherId = req.params.id;
+  const evaluationId = req.params.evaluationId;
+
+  try {
+    // Vérifier que l'évaluation appartient à l'enseignant
+    const { rows: evalCheck } = await db.query(
+      'SELECT 1 FROM my_schema.evaluations WHERE id = $1 AND teacher_id = $2',
+      [evaluationId, teacherId]
+    );
+
+    if (!evalCheck.length) {
+      return res.status(403).json({ error: 'Vous n\'êtes pas autorisé à consulter cette évaluation' });
+    }
+
+    // Récupérer les notes et remarques avec les infos étudiants
+    const { rows: grades } = await db.query(
+      `SELECT g.id, g.grade, g.remarks, u.id AS student_id, u.first_name, u.last_name
+       FROM my_schema.grades g
+       JOIN my_schema.users u ON g.student_id = u.id
+       WHERE g.evaluation_id = $1 AND u.role = 'student'`,
+      [evaluationId]
+    );
+
+    res.json({ grades });
+  } catch (err) {
+    console.error('Error in GET /api/teachers/:id/evaluations/:evaluationId/grades:', err);
+    res.status(500).json({ error: 'Erreur serveur', message: err.message });
+  }
+});
+
+app.get('/api/teachers/:id/evaluations', async (req, res) => {
+  const teacherId = req.params.id;
+  const classId = req.query.classId; // Optional filter by class
+  
+  try {
+    // Build query
+    let query = `
+      SELECT 
+        e.id, 
+        e.title, 
+        e.date, 
+        e.coefficient,
+        c.id as class_id,
+        c.name as class_name,
+        s.id as subject_id,
+        s.name as subject_name,
+        (SELECT COUNT(*) FROM my_schema.grades WHERE evaluation_id = e.id) as grades_count
+      FROM my_schema.evaluations e
+      JOIN my_schema.classes c ON e.class_id = c.id
+      JOIN my_schema.subjects s ON e.subject_id = s.id
+      WHERE e.teacher_id = $1
+    `;
+    
+    const queryParams = [teacherId];
+    
+    // Add class filter if provided
+    if (classId) {
+      query += ' AND e.class_id = $2';
+      queryParams.push(classId);
+    }
+    
+    query += ' ORDER BY e.date DESC';
+    
+    const { rows } = await db.query(query, queryParams);
+    
+    res.json(rows);
+  } catch (err) {
+    console.error('Error in GET /api/teachers/:id/evaluations:', err);
+    res.status(500).json({ error: 'Erreur serveur', message: err.message });
+  }
+});
 
 
 

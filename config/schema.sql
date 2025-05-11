@@ -61,8 +61,10 @@ CREATE TABLE my_schema.grades (
   student_id INT REFERENCES my_schema.users(id) ON DELETE CASCADE,
   evaluation_id INT REFERENCES my_schema.evaluations(id) ON DELETE CASCADE,
   grade NUMERIC CHECK (grade >= 0 AND grade <= 20) NOT NULL,
+  remarks TEXT,  
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
 
 -- Attendance (absences and delays)
 CREATE TYPE my_schema.attendance_status AS ENUM ('present', 'absent', 'late');
