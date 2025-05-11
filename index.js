@@ -266,6 +266,55 @@ app.get('/api/teachers/by-subject', async (req, res) => {
 });
 
 
+app.get('/api/teachers/:id/classes', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rows } = await db.query(`
+      SELECT c.id, c.name
+      FROM my_schema.classes c
+      JOIN my_schema.teacher_classes tc ON c.id = tc.class_id
+      WHERE tc.teacher_id = $1
+    `, [id]);
+    res.json(rows);
+  } catch (err) {
+    console.error('Error in GET /api/teachers/:id/classes:', err);
+    res.status(500).json({ error: 'Server error', message: err.message });
+  }
+});
+
+app.get('/api/subjects', async (req, res) => {
+  try {
+    const { rows } = await db.query('SELECT * FROM my_schema.subjects');
+    res.json(rows);
+  } catch (err) {
+    console.error('Error in GET /api/subjects:', err);
+    res.status(500).json({ error: 'Server error', message: err.message });
+  }
+});
+
+
+app.get('/api/teachers/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rows } = await db.query(`
+      SELECT u.id, u.first_name, u.last_name, u.subject_id
+      FROM my_schema.users u
+      WHERE u.id = $1 AND u.role = 'teacher'
+    `, [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Teacher not found' });
+    }
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error in GET /api/teachers/:id:', err);
+    res.status(500).json({ error: 'Server error', message: err.message });
+  }
+});
+
+
+
+
+
 app.post('/api/teachers', async (req, res) => {
   const { first_name, last_name, email, password, subject_name, class_names } = req.body;
 
@@ -1123,6 +1172,11 @@ app.get('/api/teachers/:id/evaluations', async (req, res) => {
 });
 
 
+
+
+
+
+
 // API to get attendance status for all students
 app.get('/api/attendance/status', async (req, res) => {
   try {
@@ -1241,7 +1295,6 @@ app.get('/api/attendance/status/class/:classId', async (req, res) => {
   }
 });
 
-// API to record attendance for students
 app.post('/api/attendance/record', async (req, res) => {
   const { studentId, subjectId, date, status } = req.body;
   
@@ -1264,13 +1317,13 @@ app.post('/api/attendance/record', async (req, res) => {
     
     let result;
     
-    if (existingCheck.length) {
+    if (existingCheck.length > 0) {
       // Update existing record
       const { rows } = await db.query(`
         UPDATE my_schema.attendance
         SET status = $1
         WHERE student_id = $2 AND subject_id = $3 AND date = $4
-        RETURNING id, status
+        RETURNING id, status, student_id, subject_id, date
       `, [status, studentId, subjectId, date]);
       
       result = {
@@ -1283,7 +1336,7 @@ app.post('/api/attendance/record', async (req, res) => {
         INSERT INTO my_schema.attendance
           (student_id, subject_id, date, status)
         VALUES ($1, $2, $3, $4)
-        RETURNING id, status
+        RETURNING id, status, student_id, subject_id, date
       `, [studentId, subjectId, date, status]);
       
       result = {
@@ -1299,121 +1352,83 @@ app.post('/api/attendance/record', async (req, res) => {
   }
 });
 
-// API to record attendance for multiple students at once (bulk operation)
+// API to record attendance for multiple students at once (bulk operation) - FIXED VERSION
 app.post('/api/attendance/bulk-record', async (req, res) => {
   const { records } = req.body;
-  
-  // Validate request body
-  if (!records || !Array.isArray(records) || records.length === 0) {
+
+  if (!Array.isArray(records) || records.length === 0) {
     return res.status(400).json({ error: 'Données invalides' });
   }
-  
+
   try {
     const results = [];
-    
-    // Use a transaction for bulk operations
     await db.query('BEGIN');
-    
-    for (const record of records) {
+
+    for (const [idx, record] of records.entries()) {
       const { studentId, subjectId, date, status } = record;
-      
-      // Validate required fields
-      if (!studentId || !subjectId || !date || !status) {
+
+      // Validation stricte : seulement null ou undefined
+      if (
+        studentId == null ||
+        subjectId == null ||
+        date == null ||
+        status == null
+      ) {
         await db.query('ROLLBACK');
-        return res.status(400).json({ error: 'Champs manquants dans les enregistrements' });
+        return res
+          .status(400)
+          .json({
+            error: 'Champs manquants dans les enregistrements',
+            details: `Record #${idx + 1} invalide`
+          });
       }
-      
-      // Validate status enum
+
+      // Statut autorisé uniquement
       if (!['present', 'absent', 'late'].includes(status)) {
         await db.query('ROLLBACK');
-        return res.status(400).json({ error: 'Statut invalide dans les enregistrements' });
+        return res
+          .status(400)
+          .json({
+            error: 'Statut invalide dans les enregistrements',
+            details: `Record #${idx + 1} : statut « ${status} »`
+          });
       }
-      
-      // Check for existing attendance record
-      const { rows: existingCheck } = await db.query(
-        'SELECT id FROM my_schema.attendance WHERE student_id = $1 AND subject_id = $2 AND date = $3',
+
+      const { rows: existing } = await db.query(
+        `SELECT id FROM my_schema.attendance
+         WHERE student_id = $1 AND subject_id = $2 AND date = $3`,
         [studentId, subjectId, date]
       );
-      
-      let result;
-      
-      if (existingCheck.length) {
-        // Update existing record
-        const { rows } = await db.query(`
+
+      let row;
+      if (existing.length > 0) {
+        ({ rows: [row] } = await db.query(`
           UPDATE my_schema.attendance
           SET status = $1
           WHERE student_id = $2 AND subject_id = $3 AND date = $4
           RETURNING id, student_id, subject_id, date, status
-        `, [status, studentId, subjectId, date]);
-        
-        result = rows[0];
+        `, [status, studentId, subjectId, date]));
       } else {
-        // Create new record
-        const { rows } = await db.query(`
+        ({ rows: [row] } = await db.query(`
           INSERT INTO my_schema.attendance
             (student_id, subject_id, date, status)
           VALUES ($1, $2, $3, $4)
           RETURNING id, student_id, subject_id, date, status
-        `, [studentId, subjectId, date, status]);
-        
-        result = rows[0];
+        `, [studentId, subjectId, date, status]));
       }
-      
-      results.push(result);
+
+      results.push(row);
     }
-    
-    // Commit the transaction
+
     await db.query('COMMIT');
-    
     res.status(201).json({
       message: 'Présences enregistrées avec succès',
       records: results
     });
+
   } catch (err) {
-    // Rollback on error
     await db.query('ROLLBACK');
     console.error('Error in POST /api/attendance/bulk-record:', err);
-    res.status(500).json({ error: 'Erreur serveur', message: err.message });
-  }
-});
-
-// API to get attendance statistics for a student
-app.get('/api/attendance/statistics/:studentId', async (req, res) => {
-  const studentId = req.params.studentId;
-  
-  try {
-    // Verify student exists
-    const { rows: studentCheck } = await db.query(
-      'SELECT 1 FROM my_schema.users WHERE id = $1 AND role = $2',
-      [studentId, 'student']
-    );
-    
-    if (!studentCheck.length) {
-      return res.status(404).json({ error: 'Élève non trouvé' });
-    }
-    
-    // Get attendance statistics by subject
-    const { rows } = await db.query(`
-      SELECT 
-        s.name as subject_name,
-        COUNT(CASE WHEN a.status = 'present' THEN 1 END) as present_count,
-        COUNT(CASE WHEN a.status = 'absent' THEN 1 END) as absent_count,
-        COUNT(CASE WHEN a.status = 'late' THEN 1 END) as late_count,
-        COUNT(a.id) as total_count,
-        ROUND(
-          (COUNT(CASE WHEN a.status = 'present' THEN 1 END)::numeric / 
-           NULLIF(COUNT(a.id), 0) * 100)::numeric, 
-          2
-        ) as attendance_rate
-      FROM my_schema.subjects s
-      LEFT JOIN my_schema.attendance a ON a.subject_id = s.id AND a.student_id = $1
-      GROUP BY s.name
-      ORDER BY s.name
-    `, [studentId]);
-    
-    res.json(rows);
-  } catch (err) {
-    console.error('Error in GET /api/attendance/statistics/:studentId:', err);
     res.status(500).json({ error: 'Erreur serveur', message: err.message });
   }
 });
