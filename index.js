@@ -227,7 +227,6 @@ app.get('/api/accounts/count', async (req, res) => {
   }
 });
 
-// Ajoutons d'abord les nouvelles routes API dans le serveur
 
 app.get('/api/students/by-class', async (req, res) => {
   try {
@@ -1434,8 +1433,137 @@ app.post('/api/attendance/bulk-record', async (req, res) => {
 });
 
 
+app.get('/api/teachers/:teacherId/students', async (req, res) => {
+  const teacherId = parseInt(req.params.teacherId);
+  if (isNaN(teacherId)) return res.status(400).json({ error: 'Invalid teacher ID' });
+
+  try {
+    const result = await db.query(`
+      SELECT DISTINCT s.id, s.first_name, s.last_name, s.email, s.class_id
+      FROM my_schema.users s
+      JOIN my_schema.classes c ON s.class_id = c.id
+      JOIN my_schema.teacher_classes tc ON tc.class_id = c.id
+      WHERE tc.teacher_id = $1 AND s.role = 'student'
+    `, [teacherId]);
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error fetching students:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 
+
+
+app.get('/api/teacher/students', async (req, res) => {
+  const teacherId = req.user.id;
+  try {
+    const result = await pool.query(`
+      SELECT u.first_name, u.last_name, c.name AS class_name
+      FROM my_schema.users u
+      JOIN my_schema.classes c ON u.class_id = c.id
+      JOIN my_schema.teacher_classes tc ON tc.class_id = c.id
+      WHERE tc.teacher_id = $1 AND u.role = 'student'
+    `, [teacherId]);
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erreur lors de la récupération des élèves' });
+  }
+});
+
+// ...existing code...
+app.get('/api/student/:id/attendance', async (req, res) => {
+  const studentId = parseInt(req.params.id);
+  if (isNaN(studentId)) {
+    return res.status(400).json({ error: 'Invalid student ID' });
+  }
+
+  try {
+    const result = await db.query(`
+      SELECT 
+        a.id,
+        a.date,
+        a.status,
+        s.name AS subject,
+        u.first_name,
+        u.last_name
+      FROM my_schema.attendance a
+      JOIN my_schema.subjects s ON a.subject_id = s.id
+      JOIN my_schema.users u ON a.student_id = u.id
+      WHERE a.student_id = $1
+      ORDER BY a.date DESC;
+    `, [studentId]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ message: 'No attendance records found for this student.' });
+    }
+
+    res.json({
+      student: {
+        id: studentId,
+        name: `${result.rows[0].first_name} ${result.rows[0].last_name}`
+      },
+      attendance: result.rows.map(row => ({
+        id: row.id,
+        date: row.date,
+        status: row.status,
+        subject: row.subject
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching attendance:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+// ...existing code...
+
+
+app.get('/api/student/:id/class', async (req, res) => {
+  const studentId = req.params.id;
+  try {
+    const result = await pool.query(`
+      SELECT c.name AS class_name
+      FROM my_schema.users u
+      JOIN my_schema.classes c ON u.class_id = c.id
+      WHERE u.id = $1 AND u.role = 'student'
+    `, [studentId]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Élève non trouvé' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erreur lors de la récupération de la classe' });
+  }
+});
+
+
+// ...existing code...
+app.get('/api/student/:id/grades', async (req, res) => {
+  const studentId = req.params.id;
+  try {
+    // Use db.query instead of pool.query
+    const result = await db.query(`
+      SELECT e.title, e.date, e.coefficient, s.name AS subject, g.grade, g.remarks
+      FROM my_schema.grades g
+      JOIN my_schema.evaluations e ON g.evaluation_id = e.id
+      JOIN my_schema.subjects s ON e.subject_id = s.id
+      WHERE g.student_id = $1
+      ORDER BY e.date DESC
+    `, [studentId]);
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erreur lors de la récupération des notes' });
+  }
+});
+// ...existing code...
 
 
 
