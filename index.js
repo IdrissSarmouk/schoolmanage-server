@@ -1543,7 +1543,6 @@ app.get('/api/student/:id/class', async (req, res) => {
 });
 
 
-// ...existing code...
 app.get('/api/student/:id/grades', async (req, res) => {
   const studentId = req.params.id;
   try {
@@ -1563,10 +1562,30 @@ app.get('/api/student/:id/grades', async (req, res) => {
     res.status(500).json({ error: 'Erreur lors de la récupération des notes' });
   }
 });
-// ...existing code...
 
 
+app.get('/api/student/:id/general-average', async (req, res) => {
+  const studentId = req.params.id;
 
+  try {
+    const result = await db.query(`
+      SELECT 
+        ROUND(SUM(g.grade * e.coefficient) / NULLIF(SUM(e.coefficient), 0), 2) AS general_average
+      FROM my_schema.grades g
+      JOIN my_schema.evaluations e ON g.evaluation_id = e.id
+      WHERE g.student_id = $1
+    `, [studentId]);
+
+    if (result.rows.length === 0 || result.rows[0].general_average === null) {
+      return res.status(404).json({ error: 'Aucune moyenne trouvée pour cet étudiant' });
+    }
+
+    res.json({ student_id: studentId, general_average: result.rows[0].general_average });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erreur lors du calcul de la moyenne générale' });
+  }
+});
 
 
 
